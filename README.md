@@ -1,2 +1,5 @@
-# VECTRO_MAIN
-**Vectro** is an AI-powered workspace that helps developers understand, analyze, and build software projects. It combines RAG, LLMs, and intelligent agents to answer project-specific questions, analyze code and documentation, and assist throughout the software development lifecycle.
+# Vectro
+
+An AI-powered engineering workspace that understands your software projects using RAG, LLMs, and intelligent agents.
+
+🚧 Currently under active development.
