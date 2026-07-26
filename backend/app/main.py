@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.core.database import dispose_database_engine
+from app.modules.users.api import router as users_router
 
 
 @asynccontextmanager
@@ -16,3 +17,4 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(users_router)

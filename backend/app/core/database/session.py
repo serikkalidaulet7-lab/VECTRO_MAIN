@@ -21,10 +21,11 @@ async_session_factory = async_sessionmaker(
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:
-    """Yield a request-scoped database session and roll it back on failure."""
+    """Yield a request-scoped database session and finalize its transaction."""
     async with async_session_factory() as session:
         try:
             yield session
+            await session.commit()
         except Exception:
             await session.rollback()
             raise
