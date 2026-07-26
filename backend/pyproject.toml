@@ -9,7 +9,8 @@ dependencies = [
     "asyncpg>=0.31.0",
     "fastapi>=0.139.2",
     "pydantic-settings>=2.14.2",
-    "sqlalchemy>=2.0.51",
+    "pytest>=9.1.1",
+    "sqlalchemy[asyncio]>=2.0.51",
     "uvicorn[standard]>=0.51.0",
 ]
 
