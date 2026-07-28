@@ -32,3 +32,11 @@ class InvalidPasswordCredentialError(UsersDomainError):
 
 class InvalidPasswordCredentialTimestampError(InvalidPasswordCredentialError):
     """Raised when a password credential lifecycle timestamp is invalid."""
+
+
+class InvalidRefreshSessionError(UsersDomainError):
+    """Raised when refresh-session state violates domain invariants."""
+
+
+class InvalidRefreshSessionTimestampError(InvalidRefreshSessionError):
+    """Raised when refresh-session lifecycle timestamps are invalid."""

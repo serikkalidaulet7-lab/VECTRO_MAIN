@@ -2,6 +2,10 @@
 
 from app.modules.users.domain.value_objects.display_name import DisplayName
 from app.modules.users.domain.value_objects.email_address import EmailAddress
+from app.modules.users.domain.value_objects.refresh_session_id import (
+    RefreshSessionFamilyId,
+    RefreshSessionId,
+)
 from app.modules.users.domain.value_objects.user_id import UserId
 
-__all__ = ["DisplayName", "EmailAddress", "UserId"]
+__all__ = ["DisplayName", "EmailAddress", "RefreshSessionFamilyId", "RefreshSessionId", "UserId"]
