@@ -1,5 +1,7 @@
 """Focused API tests for the Users password-login endpoint."""
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -60,6 +62,8 @@ def _login_output() -> LoginWithPasswordOutput:
         access_token="test-access-token",
         token_type="bearer",
         expires_in=900,
+        refresh_token="test-refresh-token",
+        refresh_expires_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
     )
 
 
@@ -77,8 +81,12 @@ def test_login_with_password_returns_access_token_response(api_app) -> None:
         "access_token": "test-access-token",
         "token_type": "bearer",
         "expires_in": 900,
+        "refresh_token": "test-refresh-token",
+        "refresh_expires_at": "2026-08-28T12:00:00Z",
     }
-    assert {"password", "password_hash", "refresh_token", "session_id"}.isdisjoint(response.json())
+    assert {"password", "password_hash", "token_hash", "session_id", "family_id"}.isdisjoint(
+        response.json()
+    )
     assert stub.inputs[0].password == " exact password "
 
 

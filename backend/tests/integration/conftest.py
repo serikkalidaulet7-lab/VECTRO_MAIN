@@ -21,6 +21,7 @@ from app.modules.users.infrastructure.persistence.models import UserModel
 from app.modules.users.infrastructure.persistence.password_credential_models import (
     PasswordCredentialModel,
 )
+from app.modules.users.infrastructure.persistence.refresh_session_models import RefreshSessionModel
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,7 @@ async def _create_tables(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:
         await connection.run_sync(UserModel.metadata.create_all)
         await connection.run_sync(PasswordCredentialModel.metadata.create_all)
+        await connection.run_sync(RefreshSessionModel.metadata.create_all)
 
 
 async def _drop_schema(engine: AsyncEngine, schema: str) -> None:
@@ -66,7 +68,7 @@ async def _drop_schema(engine: AsyncEngine, schema: str) -> None:
 async def _truncate_users(engine: AsyncEngine) -> None:
     """Clear identity tables inside the test-owned schema between integration tests."""
     async with engine.begin() as connection:
-        await connection.execute(text("TRUNCATE TABLE password_credentials, users"))
+        await connection.execute(text("TRUNCATE TABLE auth_sessions, password_credentials, users"))
 
 
 @pytest.fixture(scope="session")

@@ -20,14 +20,19 @@ from app.modules.users.application import (
 from app.modules.users.application.ports import (
     AccessTokenIssuer,
     AccessTokenValidator,
+    Clock,
     PasswordHasher,
+    RefreshTokenManager,
 )
 from app.modules.users.infrastructure import (
     Argon2PasswordHasher,
     JwtAccessTokenIssuer,
     JwtAccessTokenValidator,
+    SecureRefreshTokenManager,
     SqlAlchemyPasswordCredentialRepository,
+    SqlAlchemyRefreshSessionRepository,
     SqlAlchemyUserRepository,
+    UtcClock,
     get_dummy_password_hash,
 )
 
@@ -44,6 +49,16 @@ async def get_create_user_use_case(
 def get_password_hasher() -> PasswordHasher:
     """Provide the stateless password-hashing adapter for a registration request."""
     return Argon2PasswordHasher()
+
+
+def get_refresh_token_manager() -> RefreshTokenManager:
+    """Provide the stateless opaque refresh-token generator for a login request."""
+    return SecureRefreshTokenManager()
+
+
+def get_clock() -> Clock:
+    """Provide the production UTC clock for time-dependent authentication behavior."""
+    return UtcClock()
 
 
 def get_access_token_issuer() -> AccessTokenIssuer:
@@ -94,6 +109,8 @@ async def get_login_with_password_use_case(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     password_hasher: Annotated[PasswordHasher, Depends(get_password_hasher)],
     access_token_issuer: Annotated[AccessTokenIssuer, Depends(get_access_token_issuer)],
+    refresh_token_manager: Annotated[RefreshTokenManager, Depends(get_refresh_token_manager)],
+    clock: Annotated[Clock, Depends(get_clock)],
 ) -> LoginWithPassword:
     """Compose password login with concrete request-scoped persistence adapters."""
     return LoginWithPassword(
@@ -101,6 +118,10 @@ async def get_login_with_password_use_case(
         password_credential_repository=SqlAlchemyPasswordCredentialRepository(session),
         password_hasher=password_hasher,
         access_token_issuer=access_token_issuer,
+        refresh_session_repository=SqlAlchemyRefreshSessionRepository(session),
+        refresh_token_manager=refresh_token_manager,
+        clock=clock,
+        refresh_session_ttl_seconds=settings.REFRESH_SESSION_TTL_SECONDS,
         dummy_password_hash=get_dummy_password_hash(),
     )
 

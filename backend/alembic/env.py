@@ -11,6 +11,7 @@ from app.modules.users.infrastructure.persistence.models import UserModel
 from app.modules.users.infrastructure.persistence.password_credential_models import (
     PasswordCredentialModel,
 )
+from app.modules.users.infrastructure.persistence.refresh_session_models import RefreshSessionModel
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -22,7 +23,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
-_ORM_MODELS = (UserModel, PasswordCredentialModel)
+_ORM_MODELS = (UserModel, PasswordCredentialModel, RefreshSessionModel)
 target_metadata = _ORM_MODELS[0].metadata
 
 

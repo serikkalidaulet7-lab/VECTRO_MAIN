@@ -87,11 +87,13 @@ class RegisterWithPasswordResponse(BaseModel):
 
 
 class AccessTokenResponse(BaseModel):
-    """HTTP representation of a short-lived access token."""
+    """HTTP representation of access and opaque refresh tokens."""
 
     access_token: str
     token_type: str
     expires_in: int
+    refresh_token: str
+    refresh_expires_at: datetime
 
     @classmethod
     def from_output(cls, output: LoginWithPasswordOutput) -> "AccessTokenResponse":
@@ -100,6 +102,8 @@ class AccessTokenResponse(BaseModel):
             access_token=output.access_token,
             token_type=output.token_type,
             expires_in=output.expires_in,
+            refresh_token=output.refresh_token,
+            refresh_expires_at=output.refresh_expires_at,
         )
 
 

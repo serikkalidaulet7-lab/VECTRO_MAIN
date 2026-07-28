@@ -22,6 +22,7 @@ from app.modules.users.infrastructure.persistence.models import UserModel
 from app.modules.users.infrastructure.persistence.password_credential_models import (
     PasswordCredentialModel,
 )
+from app.modules.users.infrastructure.persistence.refresh_session_models import RefreshSessionModel
 from app.modules.users.infrastructure.security import JwtAccessTokenIssuer, JwtAccessTokenValidator
 from tests.integration.conftest import IsolatedDatabase
 
@@ -125,6 +126,9 @@ async def _update_user(
 
 async def _delete_user(session_factory: async_sessionmaker[AsyncSession], user_id: UUID) -> None:
     async with session_factory() as session:
+        await session.execute(
+            delete(RefreshSessionModel).where(RefreshSessionModel.user_id == user_id)
+        )
         await session.execute(
             delete(PasswordCredentialModel).where(PasswordCredentialModel.user_id == user_id)
         )

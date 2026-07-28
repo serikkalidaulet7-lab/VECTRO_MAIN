@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     JWT_PRIVATE_KEY: str | None = None
     JWT_PUBLIC_KEY: str | None = None
     ACCESS_TOKEN_TTL_SECONDS: int = Field(default=900, ge=60, le=3600)
+    REFRESH_SESSION_TTL_SECONDS: int = Field(default=2592000, ge=60, le=7776000)
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,

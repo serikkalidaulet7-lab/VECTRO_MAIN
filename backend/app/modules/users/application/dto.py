@@ -1,6 +1,6 @@
 """Data transfer objects for Users application use cases."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.modules.users.application.ports import IssuedAccessToken
@@ -82,19 +82,29 @@ class LoginWithPasswordInput:
 
 @dataclass(frozen=True, slots=True)
 class LoginWithPasswordOutput:
-    """Safe access-token representation returned after successful password login."""
+    """Safe authentication-token representation returned after password login."""
 
-    access_token: str
+    access_token: str = field(repr=False)
     token_type: str
     expires_in: int
+    refresh_token: str = field(repr=False)
+    refresh_expires_at: datetime
 
     @classmethod
-    def from_issued_token(cls, issued_token: IssuedAccessToken) -> "LoginWithPasswordOutput":
-        """Map an application token-issuer result to the login output boundary."""
+    def from_issued_token(
+        cls,
+        issued_token: IssuedAccessToken,
+        *,
+        refresh_token: str,
+        refresh_expires_at: datetime,
+    ) -> "LoginWithPasswordOutput":
+        """Map issued access and refresh tokens to the login output boundary."""
         return cls(
             access_token=issued_token.token,
             token_type=issued_token.token_type,
             expires_in=issued_token.expires_in,
+            refresh_token=refresh_token,
+            refresh_expires_at=refresh_expires_at,
         )
 
 
