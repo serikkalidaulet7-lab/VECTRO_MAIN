@@ -19,3 +19,7 @@ class InvalidAccessTokenError(UsersApplicationError):
 
 class InvalidRefreshTokenError(UsersApplicationError):
     """Raised when a refresh token cannot establish an active refresh session."""
+
+
+class RefreshTokenReuseDetectedError(UsersApplicationError):
+    """Raised internally after revoking a family for rotated-token reuse."""

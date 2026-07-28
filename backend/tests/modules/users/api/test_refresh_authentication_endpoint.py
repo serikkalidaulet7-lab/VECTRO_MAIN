@@ -6,7 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.modules.users.application import LoginWithPasswordOutput, RefreshAuthenticationInput
-from app.modules.users.application.exceptions import InvalidRefreshTokenError
+from app.modules.users.application.exceptions import (
+    InvalidRefreshTokenError,
+    RefreshTokenReuseDetectedError,
+)
 
 
 class StubRefreshAuthentication:
@@ -88,6 +91,21 @@ def test_refresh_maps_all_known_invalid_states_to_one_response(api_app) -> None:
         for response in responses
     )
     assert all("www-authenticate" not in response.headers for response in responses)
+
+
+def test_refresh_maps_reuse_detection_to_the_same_public_response(api_app) -> None:
+    """Reuse details remain internal while allowing endpoint completion and commit."""
+    with _client(
+        api_app, StubRefreshAuthentication(error=RefreshTokenReuseDetectedError())
+    ) as client:
+        response = client.post("/auth/refresh", json={"refresh_token": "reused-token"})
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "code": "invalid_refresh_token",
+        "message": "A valid refresh token is required.",
+    }
+    assert "www-authenticate" not in response.headers
 
 
 def test_refresh_uses_standard_validation_for_missing_or_non_string_token(api_app) -> None:

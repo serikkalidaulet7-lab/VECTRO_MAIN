@@ -29,6 +29,7 @@ from app.modules.users.application import (
     LoginWithPasswordInput,
     RefreshAuthentication,
     RefreshAuthenticationInput,
+    RefreshTokenReuseDetectedError,
     RegisterWithPassword,
     RegisterWithPasswordInput,
     UserEmailAlreadyExistsError,
@@ -135,7 +136,7 @@ async def refresh_authentication(
         output = await use_case.execute(
             RefreshAuthenticationInput(refresh_token=request.refresh_token)
         )
-    except InvalidRefreshTokenError:
+    except (InvalidRefreshTokenError, RefreshTokenReuseDetectedError):
         return _error_response(
             status_code=status.HTTP_401_UNAUTHORIZED,
             code="invalid_refresh_token",

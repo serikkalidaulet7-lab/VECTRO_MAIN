@@ -15,6 +15,7 @@ from app.modules.users.application.exceptions import (
     InvalidAccessTokenError,
     InvalidCredentialsError,
     InvalidRefreshTokenError,
+    RefreshTokenReuseDetectedError,
     UserEmailAlreadyExistsError,
     UsersApplicationError,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "InvalidAccessTokenError",
     "InvalidCredentialsError",
     "InvalidRefreshTokenError",
+    "RefreshTokenReuseDetectedError",
     "LoginWithPassword",
     "LoginWithPasswordInput",
     "LoginWithPasswordOutput",

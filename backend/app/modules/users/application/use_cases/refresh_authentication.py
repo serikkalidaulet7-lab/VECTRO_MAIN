@@ -4,7 +4,10 @@ from app.modules.users.application.dto import (
     LoginWithPasswordOutput,
     RefreshAuthenticationInput,
 )
-from app.modules.users.application.exceptions import InvalidRefreshTokenError
+from app.modules.users.application.exceptions import (
+    InvalidRefreshTokenError,
+    RefreshTokenReuseDetectedError,
+)
 from app.modules.users.application.ports import (
     AccessTokenIssuer,
     Clock,
@@ -49,11 +52,12 @@ class RefreshAuthentication:
         if refresh_session is None:
             raise InvalidRefreshTokenError()
         now = self._clock.now()
-        if (
-            refresh_session.is_expired(now)
-            or refresh_session.is_revoked
-            or refresh_session.is_rotated
-        ):
+        if refresh_session.is_expired(now):
+            raise InvalidRefreshTokenError()
+        if refresh_session.is_rotated:
+            await self._refresh_session_repository.revoke_family(refresh_session.family_id, now)
+            raise RefreshTokenReuseDetectedError()
+        if refresh_session.is_revoked:
             raise InvalidRefreshTokenError()
 
         user = await self._user_repository.get_by_id(refresh_session.user_id)

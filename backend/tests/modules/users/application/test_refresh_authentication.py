@@ -6,7 +6,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.modules.users.application import RefreshAuthentication, RefreshAuthenticationInput
-from app.modules.users.application.exceptions import InvalidRefreshTokenError
+from app.modules.users.application.exceptions import (
+    InvalidRefreshTokenError,
+    RefreshTokenReuseDetectedError,
+)
 from app.modules.users.application.ports import GeneratedRefreshToken, IssuedAccessToken
 from app.modules.users.domain import (
     DisplayName,
@@ -42,11 +45,19 @@ class FakeUsers:
 class FakeSessions:
     """Inspectable locked refresh-session repository fake."""
 
-    def __init__(self, session: RefreshSession | None, *, fail_on_save: int | None = None) -> None:
+    def __init__(
+        self,
+        session: RefreshSession | None,
+        *,
+        fail_on_save: int | None = None,
+        fail_on_revoke: bool = False,
+    ) -> None:
         self.session = session
         self.fail_on_save = fail_on_save
         self.lookups: list[str] = []
         self.saved: list[RefreshSession] = []
+        self.revocations: list[tuple[RefreshSessionFamilyId, datetime]] = []
+        self.fail_on_revoke = fail_on_revoke
 
     async def get_by_token_hash_for_update(self, token_hash: str) -> RefreshSession | None:
         self.lookups.append(token_hash)
@@ -56,6 +67,12 @@ class FakeSessions:
         if self.fail_on_save == len(self.saved) + 1:
             raise RuntimeError("session persistence failed")
         self.saved.append(session)
+
+    async def revoke_family(self, family_id: RefreshSessionFamilyId, revoked_at: datetime) -> int:
+        if self.fail_on_revoke:
+            raise RuntimeError("family revocation failed")
+        self.revocations.append((family_id, revoked_at))
+        return 1
 
 
 class FakeTokens:
@@ -112,8 +129,9 @@ def _use_case(
     *,
     fail_on_save: int | None = None,
     issuer_fail: bool = False,
+    fail_on_revoke: bool = False,
 ) -> tuple[RefreshAuthentication, FakeSessions, FakeTokens, FakeIssuer]:
-    sessions = FakeSessions(session, fail_on_save=fail_on_save)
+    sessions = FakeSessions(session, fail_on_save=fail_on_save, fail_on_revoke=fail_on_revoke)
     tokens = FakeTokens()
     issuer = FakeIssuer(fail=issuer_fail)
     return (
@@ -174,16 +192,14 @@ def test_refresh_rejects_empty_or_unknown_token(raw_token: str) -> None:
         assert sessions.lookups
 
 
-@pytest.mark.parametrize("state", ["expired", "revoked", "rotated"])
+@pytest.mark.parametrize("state", ["expired", "revoked"])
 def test_refresh_rejects_inactive_session_states(state: str) -> None:
-    """Expired, revoked, and rotated sessions cannot produce replacements."""
+    """Expired and manually revoked sessions cannot produce replacements."""
     user = _user()
     now = FixedClock().now()
     old = _session(user, expires_at=now if state == "expired" else None)
     if state == "revoked":
         old.revoke(at=now)
-    if state == "rotated":
-        old.rotate(replacement_session_id=RefreshSessionId.new(), at=now)
     use_case, sessions, tokens, issuer = _use_case(user, old)
 
     with pytest.raises(InvalidRefreshTokenError):
@@ -236,3 +252,34 @@ def test_refresh_failure_ordering_preserves_no_token_output() -> None:
         asyncio.run(use_case.execute(RefreshAuthenticationInput("old-token")))
     assert len(sessions.saved) == 2
     assert issuer.issued_for == [user.id]
+
+
+def test_refresh_reuse_revokes_family_and_returns_dedicated_internal_error() -> None:
+    """A previously rotated token revokes its family without loading the user."""
+    user = _user()
+    old = _session(user)
+    old.rotate(replacement_session_id=RefreshSessionId.new(), at=FixedClock().now())
+    use_case, sessions, tokens, issuer = _use_case(user, old)
+
+    with pytest.raises(RefreshTokenReuseDetectedError) as error:
+        asyncio.run(use_case.execute(RefreshAuthenticationInput("reused-token")))
+
+    assert "reused-token" not in repr(error.value)
+    assert sessions.revocations == [(old.family_id, FixedClock().now())]
+    assert sessions.saved == []
+    assert tokens.generate_calls == 0
+    assert issuer.issued_for == []
+
+
+def test_refresh_reuse_propagates_unexpected_family_revocation_failure() -> None:
+    """Database failures are not converted to ordinary invalid-token outcomes."""
+    user = _user()
+    old = _session(user)
+    old.rotate(replacement_session_id=RefreshSessionId.new(), at=FixedClock().now())
+    use_case, sessions, _, issuer = _use_case(user, old, fail_on_revoke=True)
+
+    with pytest.raises(RuntimeError, match="family revocation failed"):
+        asyncio.run(use_case.execute(RefreshAuthenticationInput("reused-token")))
+
+    assert sessions.revocations == []
+    assert issuer.issued_for == []

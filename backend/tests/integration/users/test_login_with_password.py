@@ -361,10 +361,10 @@ def test_refresh_rotates_session_and_preserves_absolute_expiry(
         == 2
     )
 
-    second_rotation = api_client.post(
+    replacement_after_reuse = api_client.post(
         "/auth/refresh", json={"refresh_token": refreshed.json()["refresh_token"]}
     )
-    assert second_rotation.status_code == 200
+    assert replacement_after_reuse.status_code == 401
     assert (
         len(
             asyncio.run(
@@ -373,8 +373,53 @@ def test_refresh_rotates_session_and_preserves_absolute_expiry(
                 )
             )
         )
-        == 3
+        == 2
     )
+
+
+def test_reused_family_revocation_does_not_affect_another_login_family(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """Reuse revokes only the compromised family, leaving other logins usable."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    first_login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    second_login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    rotated_first = api_client.post(
+        "/auth/refresh", json={"refresh_token": first_login.json()["refresh_token"]}
+    )
+    reused_first = api_client.post(
+        "/auth/refresh", json={"refresh_token": first_login.json()["refresh_token"]}
+    )
+    rotated_second = api_client.post(
+        "/auth/refresh", json={"refresh_token": second_login.json()["refresh_token"]}
+    )
+
+    assert registration.status_code == 201
+    assert rotated_first.status_code == 200
+    assert reused_first.status_code == 401
+    assert rotated_second.status_code == 200
+    sessions = asyncio.run(
+        _refresh_sessions(isolated_database.session_factory, UUID(registration.json()["id"]))
+    )
+    first_family = SecureRefreshTokenManager().hash(rotated_first.json()["refresh_token"])
+    first_replacement = next(session for session in sessions if session.token_hash == first_family)
+    second_replacement_hash = SecureRefreshTokenManager().hash(
+        rotated_second.json()["refresh_token"]
+    )
+    second_replacement = next(
+        session for session in sessions if session.token_hash == second_replacement_hash
+    )
+    assert first_replacement.revoked_at is not None
+    assert second_replacement.revoked_at is None
+    assert first_replacement.family_id != second_replacement.family_id
 
 
 def test_refresh_jwt_issuance_failure_rolls_back_rotation(
