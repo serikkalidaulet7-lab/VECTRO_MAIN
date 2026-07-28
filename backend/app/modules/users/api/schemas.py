@@ -40,6 +40,14 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RefreshAuthenticationRequest(BaseModel):
+    """HTTP payload for opaque refresh-token rotation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_token: str
+
+
 class UserResponse(BaseModel):
     """HTTP representation of a Vectro user identity profile."""
 

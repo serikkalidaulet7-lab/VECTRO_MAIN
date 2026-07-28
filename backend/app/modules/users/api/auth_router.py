@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from app.modules.users.api.dependencies import (
     get_current_user,
     get_login_with_password_use_case,
+    get_refresh_authentication_use_case,
     get_register_with_password_use_case,
 )
 from app.modules.users.api.router import _error_response
@@ -16,14 +17,18 @@ from app.modules.users.api.schemas import (
     CurrentUserResponse,
     ErrorResponse,
     LoginRequest,
+    RefreshAuthenticationRequest,
     RegisterWithPasswordRequest,
     RegisterWithPasswordResponse,
 )
 from app.modules.users.application import (
     GetCurrentUserOutput,
     InvalidCredentialsError,
+    InvalidRefreshTokenError,
     LoginWithPassword,
     LoginWithPasswordInput,
+    RefreshAuthentication,
+    RefreshAuthenticationInput,
     RegisterWithPassword,
     RegisterWithPasswordInput,
     UserEmailAlreadyExistsError,
@@ -111,6 +116,31 @@ async def login_with_password(
         )
         response.headers["WWW-Authenticate"] = "Bearer"
         return response
+
+    return AccessTokenResponse.from_output(output)
+
+
+@router.post(
+    "/refresh",
+    response_model=AccessTokenResponse,
+    summary="Rotate an opaque refresh token",
+    responses={status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse}},
+)
+async def refresh_authentication(
+    request: RefreshAuthenticationRequest,
+    use_case: Annotated[RefreshAuthentication, Depends(get_refresh_authentication_use_case)],
+) -> AccessTokenResponse | JSONResponse:
+    """Consume one refresh token and return its replacement token pair."""
+    try:
+        output = await use_case.execute(
+            RefreshAuthenticationInput(refresh_token=request.refresh_token)
+        )
+    except InvalidRefreshTokenError:
+        return _error_response(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            code="invalid_refresh_token",
+            message="A valid refresh token is required.",
+        )
 
     return AccessTokenResponse.from_output(output)
 

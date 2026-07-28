@@ -15,6 +15,7 @@ from app.modules.users.application import (
     GetCurrentUserOutput,
     InvalidAccessTokenError,
     LoginWithPassword,
+    RefreshAuthentication,
     RegisterWithPassword,
 )
 from app.modules.users.application.ports import (
@@ -123,6 +124,22 @@ async def get_login_with_password_use_case(
         clock=clock,
         refresh_session_ttl_seconds=settings.REFRESH_SESSION_TTL_SECONDS,
         dummy_password_hash=get_dummy_password_hash(),
+    )
+
+
+async def get_refresh_authentication_use_case(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    access_token_issuer: Annotated[AccessTokenIssuer, Depends(get_access_token_issuer)],
+    refresh_token_manager: Annotated[RefreshTokenManager, Depends(get_refresh_token_manager)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> RefreshAuthentication:
+    """Compose opaque refresh-token rotation with request-scoped persistence adapters."""
+    return RefreshAuthentication(
+        user_repository=SqlAlchemyUserRepository(session),
+        refresh_session_repository=SqlAlchemyRefreshSessionRepository(session),
+        refresh_token_manager=refresh_token_manager,
+        access_token_issuer=access_token_issuer,
+        clock=clock,
     )
 
 

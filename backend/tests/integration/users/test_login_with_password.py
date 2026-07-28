@@ -294,6 +294,117 @@ def test_two_successful_logins_create_distinct_refresh_session_families(
     assert all(session.revoked_at is None for session in sessions)
 
 
+def test_refresh_rotates_session_and_preserves_absolute_expiry(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """A real refresh request atomically creates a successor and ends its predecessor."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    old_refresh_token = login.json()["refresh_token"]
+    refreshed = api_client.post("/auth/refresh", json={"refresh_token": old_refresh_token})
+
+    assert registration.status_code == 201
+    assert login.status_code == 200
+    assert refreshed.status_code == 200
+    assert refreshed.json()["refresh_token"] != old_refresh_token
+    assert refreshed.json()["access_token"] != login.json()["access_token"]
+    claims = jwt.decode(
+        refreshed.json()["access_token"],
+        login_client.public_key_pem,
+        algorithms=["EdDSA"],
+        issuer="vectro-integration",
+        audience="vectro-api-integration",
+    )
+    assert claims["sub"] == registration.json()["id"]
+
+    sessions = asyncio.run(
+        _refresh_sessions(isolated_database.session_factory, UUID(registration.json()["id"]))
+    )
+    assert len(sessions) == 2
+    old_session = next(
+        session
+        for session in sessions
+        if session.token_hash != SecureRefreshTokenManager().hash(refreshed.json()["refresh_token"])
+    )
+    replacement = next(
+        session for session in sessions if session.id == old_session.replaced_by_session_id
+    )
+    assert old_session.revoked_at is not None
+    assert old_session.last_used_at is not None
+    assert replacement.user_id == old_session.user_id
+    assert replacement.family_id == old_session.family_id
+    assert replacement.expires_at == old_session.expires_at
+    assert replacement.revoked_at is None
+    assert replacement.token_hash == SecureRefreshTokenManager().hash(
+        refreshed.json()["refresh_token"]
+    )
+
+    rejected = api_client.post("/auth/refresh", json={"refresh_token": old_refresh_token})
+    assert rejected.status_code == 401
+    assert rejected.json() == {
+        "code": "invalid_refresh_token",
+        "message": "A valid refresh token is required.",
+    }
+    assert (
+        len(
+            asyncio.run(
+                _refresh_sessions(
+                    isolated_database.session_factory, UUID(registration.json()["id"])
+                )
+            )
+        )
+        == 2
+    )
+
+    second_rotation = api_client.post(
+        "/auth/refresh", json={"refresh_token": refreshed.json()["refresh_token"]}
+    )
+    assert second_rotation.status_code == 200
+    assert (
+        len(
+            asyncio.run(
+                _refresh_sessions(
+                    isolated_database.session_factory, UUID(registration.json()["id"])
+                )
+            )
+        )
+        == 3
+    )
+
+
+def test_refresh_jwt_issuance_failure_rolls_back_rotation(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """Issuer failure leaves the old session active and commits no replacement row."""
+    from app.main import app
+
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    app.dependency_overrides[get_access_token_issuer] = FailingAccessTokenIssuer
+    try:
+        with pytest.raises(RuntimeError, match="access token issuance failed"):
+            api_client.post("/auth/refresh", json={"refresh_token": login.json()["refresh_token"]})
+    finally:
+        app.dependency_overrides[get_access_token_issuer] = lambda: login_client.issuer
+
+    sessions = asyncio.run(
+        _refresh_sessions(isolated_database.session_factory, UUID(registration.json()["id"]))
+    )
+    assert len(sessions) == 1
+    assert sessions[0].revoked_at is None
+    assert sessions[0].replaced_by_session_id is None
+
+
 def test_login_with_password_hides_wrong_password_unknown_and_invalid_email(
     api_client,
     login_client: TokenTestKeys,

@@ -109,6 +109,13 @@ class LoginWithPasswordOutput:
 
 
 @dataclass(frozen=True, slots=True)
+class RefreshAuthenticationInput:
+    """Raw opaque refresh token supplied to authentication rotation."""
+
+    refresh_token: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class GetCurrentUserInput:
     """Raw access token supplied to current-user resolution."""
 

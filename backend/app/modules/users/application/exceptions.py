@@ -15,3 +15,7 @@ class InvalidCredentialsError(UsersApplicationError):
 
 class InvalidAccessTokenError(UsersApplicationError):
     """Raised when an access token cannot establish an active Vectro user."""
+
+
+class InvalidRefreshTokenError(UsersApplicationError):
+    """Raised when a refresh token cannot establish an active refresh session."""

@@ -7,12 +7,14 @@ from app.modules.users.application.dto import (
     GetCurrentUserOutput,
     LoginWithPasswordInput,
     LoginWithPasswordOutput,
+    RefreshAuthenticationInput,
     RegisterWithPasswordInput,
     RegisterWithPasswordOutput,
 )
 from app.modules.users.application.exceptions import (
     InvalidAccessTokenError,
     InvalidCredentialsError,
+    InvalidRefreshTokenError,
     UserEmailAlreadyExistsError,
     UsersApplicationError,
 )
@@ -20,6 +22,7 @@ from app.modules.users.application.use_cases import (
     CreateUser,
     GetCurrentUser,
     LoginWithPassword,
+    RefreshAuthentication,
     RegisterWithPassword,
 )
 
@@ -32,9 +35,12 @@ __all__ = [
     "GetCurrentUserOutput",
     "InvalidAccessTokenError",
     "InvalidCredentialsError",
+    "InvalidRefreshTokenError",
     "LoginWithPassword",
     "LoginWithPasswordInput",
     "LoginWithPasswordOutput",
+    "RefreshAuthentication",
+    "RefreshAuthenticationInput",
     "RegisterWithPassword",
     "RegisterWithPasswordInput",
     "RegisterWithPasswordOutput",
