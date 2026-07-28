@@ -96,3 +96,34 @@ class LoginWithPasswordOutput:
             token_type=issued_token.token_type,
             expires_in=issued_token.expires_in,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class GetCurrentUserInput:
+    """Raw access token supplied to current-user resolution."""
+
+    access_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class GetCurrentUserOutput:
+    """Safe persisted profile representation of the authenticated current user."""
+
+    id: str
+    email: str
+    display_name: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_user(cls, user: User) -> "GetCurrentUserOutput":
+        """Map the current domain user to the application output boundary."""
+        return cls(
+            id=str(user.id),
+            email=str(user.email),
+            display_name=str(user.display_name),
+            status=user.status.value,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+        )

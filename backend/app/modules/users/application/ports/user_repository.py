@@ -2,7 +2,7 @@
 
 from typing import Protocol
 
-from app.modules.users.domain import EmailAddress, User
+from app.modules.users.domain import EmailAddress, User, UserId
 
 
 class UserRepository(Protocol):
@@ -10,6 +10,9 @@ class UserRepository(Protocol):
 
     async def get_by_email(self, email: EmailAddress) -> User | None:
         """Return the user identified by an email address, if one exists."""
+
+    async def get_by_id(self, user_id: UserId) -> User | None:
+        """Return the user identified by a stable identifier, if one exists."""
 
     async def save(self, user: User) -> None:
         """Persist a user entity without committing an outer transaction."""

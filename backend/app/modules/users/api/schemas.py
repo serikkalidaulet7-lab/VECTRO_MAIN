@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.modules.users.application import (
     CreateUserOutput,
+    GetCurrentUserOutput,
     LoginWithPasswordOutput,
     RegisterWithPasswordOutput,
 )
@@ -99,6 +100,29 @@ class AccessTokenResponse(BaseModel):
             access_token=output.access_token,
             token_type=output.token_type,
             expires_in=output.expires_in,
+        )
+
+
+class CurrentUserResponse(BaseModel):
+    """Safe HTTP representation of the currently authenticated user profile."""
+
+    id: str
+    email: str
+    display_name: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_output(cls, output: GetCurrentUserOutput) -> "CurrentUserResponse":
+        """Create an HTTP response schema from current-user application output."""
+        return cls(
+            id=output.id,
+            email=output.email,
+            display_name=output.display_name,
+            status=output.status,
+            created_at=output.created_at,
+            updated_at=output.updated_at,
         )
 
 

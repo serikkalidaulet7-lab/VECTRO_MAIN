@@ -3,19 +3,35 @@
 from typing import Annotated
 
 from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db_session
-from app.modules.users.application import CreateUser, LoginWithPassword, RegisterWithPassword
-from app.modules.users.application.ports import AccessTokenIssuer, PasswordHasher
+from app.modules.users.application import (
+    CreateUser,
+    GetCurrentUser,
+    GetCurrentUserInput,
+    GetCurrentUserOutput,
+    InvalidAccessTokenError,
+    LoginWithPassword,
+    RegisterWithPassword,
+)
+from app.modules.users.application.ports import (
+    AccessTokenIssuer,
+    AccessTokenValidator,
+    PasswordHasher,
+)
 from app.modules.users.infrastructure import (
     Argon2PasswordHasher,
     JwtAccessTokenIssuer,
+    JwtAccessTokenValidator,
     SqlAlchemyPasswordCredentialRepository,
     SqlAlchemyUserRepository,
     get_dummy_password_hash,
 )
+
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_create_user_use_case(
@@ -39,6 +55,17 @@ def get_access_token_issuer() -> AccessTokenIssuer:
         issuer=settings.JWT_ISSUER,
         audience=settings.JWT_AUDIENCE,
         ttl_seconds=settings.ACCESS_TOKEN_TTL_SECONDS,
+    )
+
+
+def get_access_token_validator() -> AccessTokenValidator:
+    """Construct the public-key JWT validator only when protected access requires it."""
+    if settings.JWT_PUBLIC_KEY is None:
+        raise RuntimeError("JWT public verification key is not configured.")
+    return JwtAccessTokenValidator(
+        public_key_pem=settings.JWT_PUBLIC_KEY,
+        issuer=settings.JWT_ISSUER,
+        audience=settings.JWT_AUDIENCE,
     )
 
 
@@ -67,3 +94,28 @@ async def get_login_with_password_use_case(
         access_token_issuer=access_token_issuer,
         dummy_password_hash=get_dummy_password_hash(),
     )
+
+
+async def get_current_user_use_case(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    access_token_validator: Annotated[AccessTokenValidator, Depends(get_access_token_validator)],
+) -> GetCurrentUser:
+    """Compose current-user resolution with request-scoped user persistence."""
+    return GetCurrentUser(
+        access_token_validator=access_token_validator,
+        user_repository=SqlAlchemyUserRepository(session),
+    )
+
+
+async def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> GetCurrentUserOutput:
+    """Extract one Bearer token and resolve its current active Vectro user."""
+    if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
+        raise InvalidAccessTokenError()
+    use_case = GetCurrentUser(
+        access_token_validator=get_access_token_validator(),
+        user_repository=SqlAlchemyUserRepository(session),
+    )
+    return await use_case.execute(GetCurrentUserInput(access_token=credentials.credentials))

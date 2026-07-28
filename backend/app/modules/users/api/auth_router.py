@@ -6,18 +6,21 @@ from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
 
 from app.modules.users.api.dependencies import (
+    get_current_user,
     get_login_with_password_use_case,
     get_register_with_password_use_case,
 )
 from app.modules.users.api.router import _error_response
 from app.modules.users.api.schemas import (
     AccessTokenResponse,
+    CurrentUserResponse,
     ErrorResponse,
     LoginRequest,
     RegisterWithPasswordRequest,
     RegisterWithPasswordResponse,
 )
 from app.modules.users.application import (
+    GetCurrentUserOutput,
     InvalidCredentialsError,
     LoginWithPassword,
     LoginWithPasswordInput,
@@ -110,3 +113,16 @@ async def login_with_password(
         return response
 
     return AccessTokenResponse.from_output(output)
+
+
+@router.get(
+    "/me",
+    response_model=CurrentUserResponse,
+    summary="Get the current authenticated user",
+    responses={status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse}},
+)
+async def get_current_authenticated_user(
+    current_user: Annotated[GetCurrentUserOutput, Depends(get_current_user)],
+) -> CurrentUserResponse:
+    """Return the current profile resolved from a validated Bearer access token."""
+    return CurrentUserResponse.from_output(current_user)

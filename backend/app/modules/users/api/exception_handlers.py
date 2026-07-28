@@ -5,8 +5,23 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.modules.users.api.router import _error_response
+from app.modules.users.application.exceptions import InvalidAccessTokenError
 
 USERS_EMAIL_UNIQUE_CONSTRAINT = "uq_users_email"
+
+
+async def handle_invalid_access_token_error(
+    _: Request,
+    __: InvalidAccessTokenError,
+) -> JSONResponse:
+    """Map all expected protected-access failures to one stable unauthorized response."""
+    response = _error_response(
+        status_code=401,
+        code="invalid_access_token",
+        message="A valid access token is required.",
+    )
+    response.headers["WWW-Authenticate"] = "Bearer"
+    return response
 
 
 async def handle_registration_integrity_error(

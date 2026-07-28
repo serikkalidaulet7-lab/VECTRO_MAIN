@@ -3,7 +3,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.users.domain import EmailAddress, User
+from app.modules.users.domain import EmailAddress, User, UserId
 from app.modules.users.infrastructure.persistence.mapper import UserMapper
 from app.modules.users.infrastructure.persistence.models import UserModel
 
@@ -20,6 +20,11 @@ class SqlAlchemyUserRepository:
         statement = select(UserModel).where(UserModel.email == email.value)
         model = await self._session.scalar(statement)
 
+        return UserMapper.to_domain(model) if model is not None else None
+
+    async def get_by_id(self, user_id: UserId) -> User | None:
+        """Return a domain user for a stable identifier, if one exists."""
+        model = await self._session.get(UserModel, user_id.value)
         return UserMapper.to_domain(model) if model is not None else None
 
     async def save(self, user: User) -> None:

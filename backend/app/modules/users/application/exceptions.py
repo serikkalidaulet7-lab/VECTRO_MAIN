@@ -11,3 +11,7 @@ class UserEmailAlreadyExistsError(UsersApplicationError):
 
 class InvalidCredentialsError(UsersApplicationError):
     """Raised when password authentication cannot establish a valid identity."""
+
+
+class InvalidAccessTokenError(UsersApplicationError):
+    """Raised when an access token cannot establish an active Vectro user."""
