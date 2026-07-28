@@ -15,3 +15,20 @@ class InvalidDisplayNameError(UsersDomainError):
 
 class InvalidUserTimestampError(UsersDomainError):
     """Raised when a user lifecycle timestamp is invalid."""
+
+
+class InvalidPasswordError(UsersDomainError):
+    """Raised when a submitted password violates the password policy."""
+
+    def __init__(self, reason: str) -> None:
+        """Create an error containing only a safe validation reason."""
+        self.reason = reason
+        super().__init__(f"Password is invalid: {reason}.")
+
+
+class InvalidPasswordCredentialError(UsersDomainError):
+    """Raised when a password credential violates a domain invariant."""
+
+
+class InvalidPasswordCredentialTimestampError(InvalidPasswordCredentialError):
+    """Raised when a password credential lifecycle timestamp is invalid."""

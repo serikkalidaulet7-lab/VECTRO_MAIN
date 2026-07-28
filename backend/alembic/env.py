@@ -8,6 +8,9 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 from app.core.config import settings
 from app.modules.users.infrastructure.persistence.models import UserModel
+from app.modules.users.infrastructure.persistence.password_credential_models import (
+    PasswordCredentialModel,
+)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -19,7 +22,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
-target_metadata = UserModel.metadata
+_ORM_MODELS = (UserModel, PasswordCredentialModel)
+target_metadata = _ORM_MODELS[0].metadata
 
 
 def run_migrations_offline() -> None:

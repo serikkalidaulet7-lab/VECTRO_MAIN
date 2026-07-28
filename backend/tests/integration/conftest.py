@@ -18,6 +18,9 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from app.modules.users.infrastructure.persistence.models import UserModel
+from app.modules.users.infrastructure.persistence.password_credential_models import (
+    PasswordCredentialModel,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,7 @@ async def _create_tables(engine: AsyncEngine) -> None:
     """Create current SQLAlchemy metadata inside the test-owned schema."""
     async with engine.begin() as connection:
         await connection.run_sync(UserModel.metadata.create_all)
+        await connection.run_sync(PasswordCredentialModel.metadata.create_all)
 
 
 async def _drop_schema(engine: AsyncEngine, schema: str) -> None:
@@ -60,9 +64,9 @@ async def _drop_schema(engine: AsyncEngine, schema: str) -> None:
 
 
 async def _truncate_users(engine: AsyncEngine) -> None:
-    """Clear only the test-owned users table between integration tests."""
+    """Clear identity tables inside the test-owned schema between integration tests."""
     async with engine.begin() as connection:
-        await connection.execute(text("TRUNCATE TABLE users"))
+        await connection.execute(text("TRUNCATE TABLE password_credentials, users"))
 
 
 @pytest.fixture(scope="session")
