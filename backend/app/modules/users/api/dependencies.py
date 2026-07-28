@@ -69,6 +69,15 @@ def get_access_token_validator() -> AccessTokenValidator:
     )
 
 
+async def get_presented_access_token_validator(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> AccessTokenValidator | None:
+    """Create a validator only when a Bearer token was actually presented."""
+    if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
+        return None
+    return get_access_token_validator()
+
+
 async def get_register_with_password_use_case(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     password_hasher: Annotated[PasswordHasher, Depends(get_password_hasher)],
@@ -110,12 +119,18 @@ async def get_current_user_use_case(
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    access_token_validator: Annotated[
+        AccessTokenValidator | None,
+        Depends(get_presented_access_token_validator),
+    ],
 ) -> GetCurrentUserOutput:
     """Extract one Bearer token and resolve its current active Vectro user."""
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise InvalidAccessTokenError()
+    if access_token_validator is None:
+        raise InvalidAccessTokenError()
     use_case = GetCurrentUser(
-        access_token_validator=get_access_token_validator(),
+        access_token_validator=access_token_validator,
         user_repository=SqlAlchemyUserRepository(session),
     )
     return await use_case.execute(GetCurrentUserInput(access_token=credentials.credentials))
