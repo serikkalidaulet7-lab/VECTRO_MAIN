@@ -28,6 +28,7 @@ class SqlAlchemyPasswordCredentialRepository:
         model = await self._session.get(PasswordCredentialModel, credential.user_id.value)
         if model is None:
             self._session.add(PasswordCredentialMapper.from_domain(credential))
-            return
+        else:
+            PasswordCredentialMapper.update_model(model, credential)
 
-        PasswordCredentialMapper.update_model(model, credential)
+        await self._session.flush()

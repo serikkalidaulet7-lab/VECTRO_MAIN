@@ -36,3 +36,36 @@ class CreateUserOutput:
             created_at=user.created_at,
             updated_at=user.updated_at,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterWithPasswordInput:
+    """Primitive data required to register a user with a password credential."""
+
+    email: str
+    display_name: str
+    password: str
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterWithPasswordOutput:
+    """Safe user profile representation returned after password registration."""
+
+    id: str
+    email: str
+    display_name: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_user(cls, user: User) -> "RegisterWithPasswordOutput":
+        """Map a newly registered domain user to the application output boundary."""
+        return cls(
+            id=str(user.id),
+            email=str(user.email),
+            display_name=str(user.display_name),
+            status=user.status.value,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+        )
