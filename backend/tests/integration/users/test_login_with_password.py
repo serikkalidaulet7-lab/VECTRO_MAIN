@@ -22,14 +22,23 @@ from app.modules.users.api.dependencies import (
     get_access_token_issuer,
     get_clock,
     get_logout_refresh_session_use_case,
+    get_presented_access_token_validator,
 )
 from app.modules.users.application import (
+    LoginWithPasswordOutput,
     LogoutRefreshSession,
+    LogoutRefreshSessionInput,
     RefreshAuthentication,
     RefreshAuthenticationInput,
 )
-from app.modules.users.application.exceptions import RefreshTokenReuseDetectedError
-from app.modules.users.application.ports import IssuedAccessToken
+from app.modules.users.application.exceptions import (
+    InvalidRefreshTokenError,
+    RefreshTokenReuseDetectedError,
+)
+from app.modules.users.application.ports import (
+    GeneratedRefreshToken,
+    IssuedAccessToken,
+)
 from app.modules.users.domain import (
     RefreshSession,
     RefreshSessionFamilyId,
@@ -53,6 +62,7 @@ from app.modules.users.infrastructure.persistence.repository import SqlAlchemyUs
 from app.modules.users.infrastructure.security import (
     Argon2PasswordHasher,
     JwtAccessTokenIssuer,
+    JwtAccessTokenValidator,
     SecureRefreshTokenManager,
 )
 from tests.integration.conftest import IsolatedDatabase
@@ -158,6 +168,85 @@ class ObservedLockedLookupRepository:
 
     async def revoke_family(self, family_id, revoked_at):
         return await self._inner.revoke_family(family_id, revoked_at)
+
+
+class HoldingLogoutLookupRepository:
+    """Pause logout only after its real PostgreSQL row lock has been acquired."""
+
+    def __init__(
+        self,
+        inner: SqlAlchemyRefreshSessionRepository,
+        lock_acquired: asyncio.Event,
+        release_logout: asyncio.Event,
+    ) -> None:
+        self._inner = inner
+        self._lock_acquired = lock_acquired
+        self._release_logout = release_logout
+
+    async def get_by_token_hash_for_update(self, token_hash: str):
+        refresh_session = await self._inner.get_by_token_hash_for_update(token_hash)
+        self._lock_acquired.set()
+        await self._release_logout.wait()
+        return refresh_session
+
+    async def save(self, refresh_session) -> None:
+        await self._inner.save(refresh_session)
+
+    async def revoke_family(self, family_id, revoked_at) -> int:
+        return await self._inner.revoke_family(family_id, revoked_at)
+
+
+class ObservedRefreshLookupRepository:
+    """Expose when refresh enters and leaves its real PostgreSQL locked lookup."""
+
+    def __init__(
+        self,
+        inner: SqlAlchemyRefreshSessionRepository,
+        lookup_started: asyncio.Event,
+        lookup_returned: asyncio.Event,
+    ) -> None:
+        self._inner = inner
+        self._lookup_started = lookup_started
+        self._lookup_returned = lookup_returned
+
+    async def get_by_token_hash_for_update(self, token_hash: str):
+        self._lookup_started.set()
+        refresh_session = await self._inner.get_by_token_hash_for_update(token_hash)
+        self._lookup_returned.set()
+        return refresh_session
+
+    async def save(self, refresh_session) -> None:
+        await self._inner.save(refresh_session)
+
+    async def revoke_family(self, family_id, revoked_at) -> int:
+        return await self._inner.revoke_family(family_id, revoked_at)
+
+
+class CountingRefreshTokenManager:
+    """Delegate secure token operations while recording replacement-token generation."""
+
+    def __init__(self, inner: SecureRefreshTokenManager) -> None:
+        self._inner = inner
+        self.generate_calls = 0
+
+    def generate(self) -> GeneratedRefreshToken:
+        self.generate_calls += 1
+        return self._inner.generate()
+
+    def hash(self, token: str) -> str:
+        return self._inner.hash(token)
+
+
+class CountingAccessTokenIssuer:
+    """Delegate real token issuance while recording unexpected refresh issuance."""
+
+    def __init__(self, inner: JwtAccessTokenIssuer) -> None:
+        self._inner = inner
+        self.issue_calls = 0
+
+    def issue(self, user_id: UserId) -> IssuedAccessToken:
+        self.issue_calls += 1
+        return self._inner.issue(user_id)
 
 
 def _token_test_keys() -> TokenTestKeys:
@@ -571,6 +660,103 @@ def test_refresh_rotation_chain_preserves_integrity_and_absolute_expiry(
     assert api_client.post("/auth/refresh", json={"refresh_token": tokens[-1]}).status_code == 401
 
 
+def test_long_refresh_chain_logout_revokes_family_but_keeps_access_token_valid(
+    api_client,
+    capsys,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """A middle chain token logs out D without revoking D's already-issued access JWT."""
+    from app.main import app
+
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    tokens = [login.json()["refresh_token"]]
+    access_token_d = ""
+    for _ in range(3):
+        refreshed = api_client.post("/auth/refresh", json={"refresh_token": tokens[-1]})
+        assert refreshed.status_code == 200
+        tokens.append(refreshed.json()["refresh_token"])
+        access_token_d = refreshed.json()["access_token"]
+
+    user_id = UUID(registration.json()["id"])
+    sessions = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    by_hash = {session.token_hash: session for session in sessions}
+    chain = [by_hash[SecureRefreshTokenManager().hash(token)] for token in tokens]
+    assert len(chain) == 4
+    assert len({session.id for session in chain}) == 4
+    assert len({session.token_hash for session in chain}) == 4
+    assert {session.user_id for session in chain} == {user_id}
+    assert len({session.family_id for session in chain}) == 1
+    assert len({session.expires_at for session in chain}) == 1
+    assert "refresh_token" not in RefreshSessionModel.__table__.c
+    for current, successor in zip(chain, chain[1:], strict=False):
+        assert current.replaced_by_session_id == successor.id
+        assert current.id != successor.id
+        assert current.family_id == successor.family_id
+        assert current.user_id == successor.user_id
+    assert all(session.revoked_at is not None for session in chain[:-1])
+    assert chain[-1].revoked_at is None
+    original_revocations = {session.id: session.revoked_at for session in chain[:-1]}
+
+    logout = api_client.post("/auth/logout", json={"refresh_token": tokens[1]})
+    assert logout.status_code == 204
+    assert logout.content == b""
+    after_logout = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert len(after_logout) == 4
+    after_by_id = {session.id: session for session in after_logout}
+    for session_id, revoked_at in original_revocations.items():
+        assert after_by_id[session_id].revoked_at == revoked_at
+    terminal = after_by_id[chain[-1].id]
+    assert terminal.revoked_at is not None
+    assert terminal.replaced_by_session_id is None
+    assert sum(session.revoked_at is None for session in after_logout) == 0
+    for current, successor in zip(chain, chain[1:], strict=False):
+        assert after_by_id[current.id].replaced_by_session_id == successor.id
+
+    rejected = api_client.post("/auth/refresh", json={"refresh_token": tokens[-1]})
+    assert rejected.status_code == 401
+    assert rejected.json()["code"] == "invalid_refresh_token"
+    assert len(asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))) == 4
+
+    validator = JwtAccessTokenValidator(
+        public_key_pem=login_client.public_key_pem,
+        issuer="vectro-integration",
+        audience="vectro-api-integration",
+    )
+    app.dependency_overrides[get_presented_access_token_validator] = lambda: validator
+    try:
+        current_user = api_client.get(
+            "/auth/me", headers={"Authorization": f"Bearer {access_token_d}"}
+        )
+    finally:
+        app.dependency_overrides.pop(get_presented_access_token_validator, None)
+    assert current_user.status_code == 200
+    assert current_user.json()["id"] == str(user_id)
+
+    revocations_after_first_logout = {session.id: session.revoked_at for session in after_logout}
+    for token in tokens:
+        repeated = api_client.post("/auth/logout", json={"refresh_token": token})
+        assert repeated.status_code == 204
+        assert repeated.content == b""
+    after_repeats = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert len(after_repeats) == 4
+    assert {
+        session.id: session.revoked_at for session in after_repeats
+    } == revocations_after_first_logout
+
+    password_hash = asyncio.run(
+        _credential_model(isolated_database.session_factory, user_id)
+    ).password_hash
+    captured = capsys.readouterr()
+    captured_output = captured.out + captured.err
+    for secret in (*tokens, access_token_d, password_hash, "correct horse battery staple"):
+        assert secret not in captured_output
+
+
 def test_concurrent_refresh_serializes_with_postgresql_row_lock_and_revokes_family(
     api_client,
     login_client: TokenTestKeys,
@@ -683,6 +869,513 @@ def test_concurrent_refresh_serializes_with_postgresql_row_lock_and_revokes_fami
         == 401
     )
     assert len(asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))) == 2
+
+
+def test_logout_wins_refresh_race_with_postgresql_row_lock(
+    api_client,
+    capsys,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """Logout revocation commits before a blocked refresh can consume session A."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    assert registration.status_code == 201
+    assert login.status_code == 200
+    raw_token = login.json()["refresh_token"]
+    user_id = UUID(registration.json()["id"])
+    original = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))[0]
+    original_id = original.id
+    original_family_id = original.family_id
+    original_token_hash = original.token_hash
+    original_expires_at = original.expires_at
+    assert original.last_used_at is None
+    assert original.revoked_at is None
+    assert original.replaced_by_session_id is None
+
+    async def run_race() -> tuple[bool, bool, int, int]:
+        logout_lock_acquired = asyncio.Event()
+        release_logout = asyncio.Event()
+        refresh_lookup_started = asyncio.Event()
+        refresh_lookup_returned = asyncio.Event()
+        logout_session = isolated_database.session_factory()
+        refresh_session = isolated_database.session_factory()
+        logout_task: asyncio.Task[None] | None = None
+        refresh_task: asyncio.Task[object] | None = None
+        refresh_token_manager = CountingRefreshTokenManager(SecureRefreshTokenManager())
+        access_token_issuer = CountingAccessTokenIssuer(login_client.issuer)
+        refresh_invalid = False
+        try:
+            logout_use_case = LogoutRefreshSession(
+                refresh_session_repository=HoldingLogoutLookupRepository(
+                    SqlAlchemyRefreshSessionRepository(logout_session),
+                    logout_lock_acquired,
+                    release_logout,
+                ),
+                refresh_token_manager=SecureRefreshTokenManager(),
+                clock=FixedClock(),
+            )
+            refresh_use_case = RefreshAuthentication(
+                user_repository=SqlAlchemyUserRepository(refresh_session),
+                refresh_session_repository=ObservedRefreshLookupRepository(
+                    SqlAlchemyRefreshSessionRepository(refresh_session),
+                    refresh_lookup_started,
+                    refresh_lookup_returned,
+                ),
+                refresh_token_manager=refresh_token_manager,
+                access_token_issuer=access_token_issuer,
+                clock=FixedClock(),
+            )
+            logout_task = asyncio.create_task(
+                logout_use_case.execute(LogoutRefreshSessionInput(raw_token))
+            )
+            await asyncio.wait_for(logout_lock_acquired.wait(), timeout=5)
+
+            refresh_task = asyncio.create_task(
+                refresh_use_case.execute(RefreshAuthenticationInput(raw_token))
+            )
+            await asyncio.wait_for(refresh_lookup_started.wait(), timeout=5)
+            assert not refresh_lookup_returned.is_set()
+            assert not refresh_task.done()
+            assert len(await _refresh_sessions(isolated_database.session_factory, user_id)) == 1
+
+            release_logout.set()
+            assert await asyncio.wait_for(logout_task, timeout=5) is None
+            await logout_session.commit()
+
+            await asyncio.wait_for(refresh_lookup_returned.wait(), timeout=5)
+            try:
+                await asyncio.wait_for(refresh_task, timeout=5)
+            except InvalidRefreshTokenError:
+                refresh_invalid = True
+            except RefreshTokenReuseDetectedError as error:
+                raise AssertionError(
+                    "Logout-revoked token must not be treated as reuse."
+                ) from error
+            else:
+                raise AssertionError(
+                    "Refresh must not issue tokens after logout revokes its family."
+                )
+            return (
+                refresh_invalid,
+                refresh_lookup_returned.is_set(),
+                access_token_issuer.issue_calls,
+                refresh_token_manager.generate_calls,
+            )
+        finally:
+            release_logout.set()
+            for task in (logout_task, refresh_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            for task in (logout_task, refresh_task):
+                if task is not None:
+                    try:
+                        await task
+                    except (asyncio.CancelledError, InvalidRefreshTokenError):
+                        pass
+            if logout_session.in_transaction():
+                await logout_session.rollback()
+            if refresh_session.in_transaction():
+                await refresh_session.rollback()
+            await logout_session.close()
+            await refresh_session.close()
+
+    refresh_invalid, refresh_lookup_returned, issue_calls, generate_calls = asyncio.run(run_race())
+
+    assert refresh_invalid
+    assert refresh_lookup_returned
+    assert issue_calls == 0
+    assert generate_calls == 0
+    sessions = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert len(sessions) == 1
+    final_session = sessions[0]
+    assert final_session.id == original_id
+    assert final_session.family_id == original_family_id
+    assert final_session.token_hash == original_token_hash
+    assert final_session.expires_at == original_expires_at
+    assert final_session.revoked_at is not None
+    assert final_session.last_used_at is None
+    assert final_session.replaced_by_session_id is None
+    assert final_session.revoked_at < final_session.expires_at
+    assert not RefreshSessionMapper.to_domain(final_session).is_active(FixedClock().now())
+    assert sum(session.revoked_at is None for session in sessions) == 0
+
+    subsequent_refresh = api_client.post("/auth/refresh", json={"refresh_token": raw_token})
+    assert subsequent_refresh.status_code == 401
+    assert subsequent_refresh.json()["code"] == "invalid_refresh_token"
+    assert len(asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))) == 1
+
+    captured = capsys.readouterr()
+    captured_output = captured.out + captured.err
+    for sensitive_value in (
+        raw_token,
+        original_token_hash,
+        str(original_id),
+        str(original_family_id),
+        str(user_id),
+        "correct horse battery staple",
+        "-----BEGIN PRIVATE KEY-----",
+        "BEGIN",
+        "SELECT ",
+        "ck_auth_sessions",
+        "/Users/mac/Desktop/VECTRO_MAIN",
+        "Traceback",
+    ):
+        assert sensitive_value not in captured_output
+
+
+def test_refresh_wins_logout_race_with_postgresql_row_lock(
+    api_client,
+    capsys,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """Logout revokes refresh's committed replacement after waiting on session A's lock."""
+    from app.main import app
+
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    assert registration.status_code == 201
+    assert login.status_code == 200
+    raw_token_a = login.json()["refresh_token"]
+    user_id = UUID(registration.json()["id"])
+    original = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))[0]
+    original_id = original.id
+    original_family_id = original.family_id
+    original_token_hash = original.token_hash
+    original_created_at = original.created_at
+    original_expires_at = original.expires_at
+
+    async def run_race() -> tuple[LoginWithPasswordOutput, int, int, bool]:
+        refresh_lock_acquired = asyncio.Event()
+        release_refresh = asyncio.Event()
+        logout_lookup_started = asyncio.Event()
+        logout_lookup_returned = asyncio.Event()
+        refresh_session = isolated_database.session_factory()
+        logout_session = isolated_database.session_factory()
+        refresh_task: asyncio.Task[LoginWithPasswordOutput] | None = None
+        logout_task: asyncio.Task[None] | None = None
+        refresh_token_manager = CountingRefreshTokenManager(SecureRefreshTokenManager())
+        access_token_issuer = CountingAccessTokenIssuer(login_client.issuer)
+        try:
+            refresh_use_case = RefreshAuthentication(
+                user_repository=SqlAlchemyUserRepository(refresh_session),
+                refresh_session_repository=HoldingLockedLookupRepository(
+                    SqlAlchemyRefreshSessionRepository(refresh_session),
+                    refresh_lock_acquired,
+                    release_refresh,
+                ),
+                refresh_token_manager=refresh_token_manager,
+                access_token_issuer=access_token_issuer,
+                clock=FixedClock(),
+            )
+            logout_use_case = LogoutRefreshSession(
+                refresh_session_repository=ObservedLockedLookupRepository(
+                    SqlAlchemyRefreshSessionRepository(logout_session),
+                    logout_lookup_started,
+                    logout_lookup_returned,
+                ),
+                refresh_token_manager=SecureRefreshTokenManager(),
+                clock=FixedClock(),
+            )
+            refresh_task = asyncio.create_task(
+                refresh_use_case.execute(RefreshAuthenticationInput(raw_token_a))
+            )
+            await asyncio.wait_for(refresh_lock_acquired.wait(), timeout=5)
+
+            logout_task = asyncio.create_task(
+                logout_use_case.execute(LogoutRefreshSessionInput(raw_token_a))
+            )
+            await asyncio.wait_for(logout_lookup_started.wait(), timeout=5)
+            assert not logout_lookup_returned.is_set()
+            assert not logout_task.done()
+            visible_sessions = await _refresh_sessions(isolated_database.session_factory, user_id)
+            assert len(visible_sessions) == 1
+            assert visible_sessions[0].id == original_id
+            assert visible_sessions[0].revoked_at is None
+            assert visible_sessions[0].replaced_by_session_id is None
+
+            release_refresh.set()
+            refresh_output = await asyncio.wait_for(refresh_task, timeout=5)
+            await refresh_session.commit()
+
+            await asyncio.wait_for(logout_lookup_returned.wait(), timeout=5)
+            assert await asyncio.wait_for(logout_task, timeout=5) is None
+            await logout_session.commit()
+            return (
+                refresh_output,
+                access_token_issuer.issue_calls,
+                refresh_token_manager.generate_calls,
+                logout_lookup_returned.is_set(),
+            )
+        finally:
+            release_refresh.set()
+            for task in (refresh_task, logout_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            for task in (refresh_task, logout_task):
+                if task is not None:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+            if refresh_session.in_transaction():
+                await refresh_session.rollback()
+            if logout_session.in_transaction():
+                await logout_session.rollback()
+            await refresh_session.close()
+            await logout_session.close()
+
+    refresh_output, issue_calls, generate_calls, logout_lookup_returned = asyncio.run(run_race())
+
+    assert refresh_output.access_token
+    assert refresh_output.refresh_token
+    assert refresh_output.refresh_token != raw_token_a
+    assert issue_calls == 1
+    assert generate_calls == 1
+    assert logout_lookup_returned
+
+    sessions = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert len(sessions) == 2
+    original_after = next(session for session in sessions if session.id == original_id)
+    replacement = next(session for session in sessions if session.id != original_id)
+    assert original_after.user_id == user_id
+    assert original_after.family_id == original_family_id
+    assert original_after.token_hash == original_token_hash
+    assert original_after.created_at == original_created_at
+    assert original_after.expires_at == original_expires_at
+    assert original_after.revoked_at is not None
+    assert original_after.replaced_by_session_id == replacement.id
+    assert replacement.id != original_after.id
+    assert replacement.user_id == original_after.user_id
+    assert replacement.family_id == original_after.family_id
+    assert replacement.token_hash != original_after.token_hash
+    assert replacement.expires_at == original_after.expires_at
+    assert replacement.replaced_by_session_id is None
+    assert replacement.revoked_at is not None
+    assert sum(session.revoked_at is None for session in sessions) == 0
+
+    replacement_refresh = api_client.post(
+        "/auth/refresh", json={"refresh_token": refresh_output.refresh_token}
+    )
+    assert replacement_refresh.status_code == 401
+    assert replacement_refresh.json()["code"] == "invalid_refresh_token"
+    assert len(asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))) == 2
+
+    validator = JwtAccessTokenValidator(
+        public_key_pem=login_client.public_key_pem,
+        issuer="vectro-integration",
+        audience="vectro-api-integration",
+    )
+    app.dependency_overrides[get_presented_access_token_validator] = lambda: validator
+    try:
+        current_user = api_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {refresh_output.access_token}"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_presented_access_token_validator, None)
+    assert current_user.status_code == 200
+    assert current_user.json()["id"] == str(user_id)
+
+    password_hash = asyncio.run(
+        _credential_model(isolated_database.session_factory, user_id)
+    ).password_hash
+    captured = capsys.readouterr()
+    captured_output = captured.out + captured.err
+    for sensitive_value in (
+        raw_token_a,
+        refresh_output.refresh_token,
+        refresh_output.access_token,
+        original_token_hash,
+        replacement.token_hash,
+        str(original_id),
+        str(original_family_id),
+        str(user_id),
+        "correct horse battery staple",
+        password_hash,
+        "-----BEGIN PRIVATE KEY-----",
+        "SELECT ",
+        "ck_auth_sessions",
+        "/Users/mac/Desktop/VECTRO_MAIN",
+        "Traceback",
+    ):
+        assert sensitive_value not in captured_output
+
+
+def test_refresh_wins_race_isolated_from_another_login_family(
+    api_client,
+    capsys,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """A refresh-wins logout race revokes only family A, never a sibling family B."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    login_a = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    login_b = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    assert registration.status_code == 201
+    assert login_a.status_code == login_b.status_code == 200
+    user_id = UUID(registration.json()["id"])
+    raw_token_a = login_a.json()["refresh_token"]
+    raw_token_b = login_b.json()["refresh_token"]
+    initial = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    token_manager = SecureRefreshTokenManager()
+    session_a = next(
+        session for session in initial if session.token_hash == token_manager.hash(raw_token_a)
+    )
+    session_b = next(
+        session for session in initial if session.token_hash == token_manager.hash(raw_token_b)
+    )
+    assert session_a.family_id != session_b.family_id
+    snapshot_b = (
+        session_b.id,
+        session_b.token_hash,
+        session_b.created_at,
+        session_b.expires_at,
+        session_b.last_used_at,
+        session_b.revoked_at,
+        session_b.replaced_by_session_id,
+    )
+
+    async def run_family_a_race() -> LoginWithPasswordOutput:
+        locked = asyncio.Event()
+        release = asyncio.Event()
+        logout_started = asyncio.Event()
+        logout_returned = asyncio.Event()
+        refresh_db_session = isolated_database.session_factory()
+        logout_db_session = isolated_database.session_factory()
+        refresh_task: asyncio.Task[LoginWithPasswordOutput] | None = None
+        logout_task: asyncio.Task[None] | None = None
+        try:
+            refresh = RefreshAuthentication(
+                user_repository=SqlAlchemyUserRepository(refresh_db_session),
+                refresh_session_repository=HoldingLockedLookupRepository(
+                    SqlAlchemyRefreshSessionRepository(refresh_db_session), locked, release
+                ),
+                refresh_token_manager=SecureRefreshTokenManager(),
+                access_token_issuer=login_client.issuer,
+                clock=FixedClock(),
+            )
+            logout = LogoutRefreshSession(
+                refresh_session_repository=ObservedLockedLookupRepository(
+                    SqlAlchemyRefreshSessionRepository(logout_db_session),
+                    logout_started,
+                    logout_returned,
+                ),
+                refresh_token_manager=SecureRefreshTokenManager(),
+                clock=FixedClock(),
+            )
+            refresh_task = asyncio.create_task(
+                refresh.execute(RefreshAuthenticationInput(raw_token_a))
+            )
+            await asyncio.wait_for(locked.wait(), timeout=5)
+            logout_task = asyncio.create_task(
+                logout.execute(LogoutRefreshSessionInput(raw_token_a))
+            )
+            await asyncio.wait_for(logout_started.wait(), timeout=5)
+            assert not logout_returned.is_set()
+            assert not logout_task.done()
+            release.set()
+            output = await asyncio.wait_for(refresh_task, timeout=5)
+            await refresh_db_session.commit()
+            await asyncio.wait_for(logout_returned.wait(), timeout=5)
+            assert await asyncio.wait_for(logout_task, timeout=5) is None
+            await logout_db_session.commit()
+            return output
+        finally:
+            release.set()
+            for task in (refresh_task, logout_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            for task in (refresh_task, logout_task):
+                if task is not None:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+            if refresh_db_session.in_transaction():
+                await refresh_db_session.rollback()
+            if logout_db_session.in_transaction():
+                await logout_db_session.rollback()
+            await refresh_db_session.close()
+            await logout_db_session.close()
+
+    replacement_a = asyncio.run(run_family_a_race())
+    after_a_race = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    family_a = [session for session in after_a_race if session.family_id == session_a.family_id]
+    family_b_before_rotation = [
+        session for session in after_a_race if session.family_id == session_b.family_id
+    ]
+    assert len(family_a) == 2
+    assert len(family_b_before_rotation) == 1
+    assert sum(session.revoked_at is None for session in family_a) == 0
+    assert (
+        tuple(
+            getattr(family_b_before_rotation[0], attribute)
+            for attribute in (
+                "id",
+                "token_hash",
+                "created_at",
+                "expires_at",
+                "last_used_at",
+                "revoked_at",
+                "replaced_by_session_id",
+            )
+        )
+        == snapshot_b
+    )
+    after_a_by_id = {session.id: session for session in after_a_race}
+    assert all(
+        session.replaced_by_session_id is None
+        or after_a_by_id[session.replaced_by_session_id].family_id == session.family_id
+        for session in after_a_race
+    )
+
+    refreshed_b = api_client.post("/auth/refresh", json={"refresh_token": raw_token_b})
+    assert refreshed_b.status_code == 200
+    assert refreshed_b.json()["refresh_token"] != raw_token_b
+    final_sessions = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    final_family_a = [
+        session for session in final_sessions if session.family_id == session_a.family_id
+    ]
+    final_family_b = [
+        session for session in final_sessions if session.family_id == session_b.family_id
+    ]
+    assert len(final_family_a) == 2
+    assert len(final_family_b) == 2
+    assert sum(session.revoked_at is None for session in final_family_a) == 0
+    assert sum(session.revoked_at is None for session in final_family_b) == 1
+    final_by_id = {session.id: session for session in final_sessions}
+    assert all(
+        session.replaced_by_session_id is None
+        or final_by_id[session.replaced_by_session_id].family_id == session.family_id
+        for session in final_sessions
+    )
+    assert all(session.user_id == user_id for session in final_sessions)
+    assert len({session.token_hash for session in final_sessions}) == len(final_sessions)
+    assert replacement_a.refresh_token not in {session.token_hash for session in final_sessions}
+
+    captured = capsys.readouterr()
+    captured_output = captured.out + captured.err
+    for secret in (
+        raw_token_a,
+        raw_token_b,
+        replacement_a.refresh_token,
+        "correct horse battery staple",
+    ):
+        assert secret not in captured_output
 
 
 def test_refresh_jwt_issuance_failure_rolls_back_rotation(

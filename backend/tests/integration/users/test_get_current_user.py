@@ -186,9 +186,13 @@ def test_current_user_rejects_missing_and_tampered_tokens(
 ) -> None:
     """Missing and altered bearer tokens share the stable unauthorized response."""
     _, token = _token(api_client)
+    replacement_character = "y" if token.endswith("x") else "x"
     responses = [
         api_client.get("/auth/me"),
-        api_client.get("/auth/me", headers={"Authorization": f"Bearer {token[:-1]}x"}),
+        api_client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {token[:-1]}{replacement_character}"},
+        ),
     ]
     assert all(
         response.status_code == 401 and response.json() == EXPECTED_ERROR for response in responses
