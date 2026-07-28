@@ -48,6 +48,14 @@ class RefreshAuthenticationRequest(BaseModel):
     refresh_token: str
 
 
+class LogoutRefreshSessionRequest(BaseModel):
+    """HTTP payload for privacy-preserving refresh-family logout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_token: str
+
+
 class UserResponse(BaseModel):
     """HTTP representation of a Vectro user identity profile."""
 

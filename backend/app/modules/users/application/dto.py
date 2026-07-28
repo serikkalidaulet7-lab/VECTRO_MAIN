@@ -116,6 +116,13 @@ class RefreshAuthenticationInput:
 
 
 @dataclass(frozen=True, slots=True)
+class LogoutRefreshSessionInput:
+    """Raw opaque refresh token submitted for privacy-preserving logout."""
+
+    refresh_token: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class GetCurrentUserInput:
     """Raw access token supplied to current-user resolution."""
 

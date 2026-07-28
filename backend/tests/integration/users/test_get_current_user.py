@@ -150,6 +150,36 @@ def test_registration_login_and_current_user_full_flow(
     assert {"access_token", "password", "password_hash", "credential"}.isdisjoint(response.json())
 
 
+def test_logout_revokes_refresh_capability_but_not_existing_access_token(
+    api_client,
+    auth_keys: AuthKeyMaterial,
+) -> None:
+    """Logout intentionally leaves a previously issued stateless access JWT valid."""
+    registration = api_client.post("/auth/register", json=_payload())
+    login = api_client.post(
+        "/auth/login",
+        json={"email": "me.user@vectro.dev", "password": _payload()["password"]},
+    )
+    logout = api_client.post("/auth/logout", json={"refresh_token": login.json()["refresh_token"]})
+    current_user = api_client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {login.json()['access_token']}"}
+    )
+    refresh = api_client.post(
+        "/auth/refresh", json={"refresh_token": login.json()["refresh_token"]}
+    )
+
+    assert registration.status_code == 201
+    assert logout.status_code == 204
+    assert logout.content == b""
+    assert current_user.status_code == 200
+    assert current_user.json()["id"] == registration.json()["id"]
+    assert refresh.status_code == 401
+    assert refresh.json() == {
+        "code": "invalid_refresh_token",
+        "message": "A valid refresh token is required.",
+    }
+
+
 def test_current_user_rejects_missing_and_tampered_tokens(
     api_client,
     auth_keys: AuthKeyMaterial,

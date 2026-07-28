@@ -1,8 +1,10 @@
 """PostgreSQL-backed integration tests for password login and access tokens."""
 
 import asyncio
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 from uuid import UUID
 
 import jwt
@@ -11,14 +13,29 @@ from argon2 import PasswordHasher as Argon2LibraryPasswordHasher
 from argon2 import Type
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.modules.users.api.dependencies import get_access_token_issuer, get_clock
-from app.modules.users.application import RefreshAuthentication, RefreshAuthenticationInput
+from app.core.database import get_db_session
+from app.modules.users.api.dependencies import (
+    get_access_token_issuer,
+    get_clock,
+    get_logout_refresh_session_use_case,
+)
+from app.modules.users.application import (
+    LogoutRefreshSession,
+    RefreshAuthentication,
+    RefreshAuthenticationInput,
+)
 from app.modules.users.application.exceptions import RefreshTokenReuseDetectedError
 from app.modules.users.application.ports import IssuedAccessToken
-from app.modules.users.domain import UserId
+from app.modules.users.domain import (
+    RefreshSession,
+    RefreshSessionFamilyId,
+    RefreshSessionId,
+    UserId,
+)
 from app.modules.users.infrastructure.persistence.mapper import UserMapper
 from app.modules.users.infrastructure.persistence.models import UserModel
 from app.modules.users.infrastructure.persistence.password_credential_mapper import (
@@ -27,6 +44,7 @@ from app.modules.users.infrastructure.persistence.password_credential_mapper imp
 from app.modules.users.infrastructure.persistence.password_credential_models import (
     PasswordCredentialModel,
 )
+from app.modules.users.infrastructure.persistence.refresh_session_mapper import RefreshSessionMapper
 from app.modules.users.infrastructure.persistence.refresh_session_models import RefreshSessionModel
 from app.modules.users.infrastructure.persistence.refresh_session_repository import (
     SqlAlchemyRefreshSessionRepository,
@@ -64,6 +82,30 @@ class FailingAccessTokenIssuer:
     def issue(self, user_id: UserId) -> IssuedAccessToken:
         """Fail after refresh-session staging, before a response can be returned."""
         raise RuntimeError("access token issuance failed")
+
+
+class SyntheticFamilyRevocationError(RuntimeError):
+    """Synthetic test-only persistence failure without sensitive state."""
+
+
+class FailingFamilyRevocationRepository:
+    """Delegate real locked lookup while injecting a family-revocation failure."""
+
+    def __init__(self, inner: SqlAlchemyRefreshSessionRepository) -> None:
+        self._inner = inner
+
+    async def get_by_token_hash_for_update(self, token_hash: str):
+        return await self._inner.get_by_token_hash_for_update(token_hash)
+
+    async def save(self, refresh_session):
+        await self._inner.save(refresh_session)
+
+    async def revoke_family(
+        self,
+        family_id: RefreshSessionFamilyId,
+        revoked_at: datetime,
+    ) -> int:
+        raise SyntheticFamilyRevocationError("Synthetic family revocation failure.")
 
 
 class HoldingLockedLookupRepository:
@@ -787,3 +829,217 @@ def test_login_with_password_rehashes_a_weaker_hash_after_verification(
     assert after.password_changed_at >= before.password_changed_at
     assert after.updated_at >= before.updated_at
     assert password != after.password_hash
+
+
+def test_logout_family_revocation_failure_rolls_back_and_preserves_refresh_token(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """Unexpected logout persistence failure rolls back and leaves refresh usable."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    user_id = UUID(registration.json()["id"])
+    refresh_token = login.json()["refresh_token"]
+
+    async def failing_logout_use_case(
+        session: Annotated[AsyncSession, Depends(get_db_session)],
+    ) -> LogoutRefreshSession:
+        return LogoutRefreshSession(
+            refresh_session_repository=FailingFamilyRevocationRepository(
+                SqlAlchemyRefreshSessionRepository(session)
+            ),
+            refresh_token_manager=SecureRefreshTokenManager(),
+            clock=FixedClock(),
+        )
+
+    from app.main import app
+
+    before = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    app.dependency_overrides[get_logout_refresh_session_use_case] = failing_logout_use_case
+    try:
+        with pytest.raises(
+            SyntheticFamilyRevocationError, match="Synthetic family revocation failure"
+        ):
+            api_client.post("/auth/logout", json={"refresh_token": refresh_token})
+    finally:
+        app.dependency_overrides.pop(get_logout_refresh_session_use_case, None)
+
+    after_failure = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert len(before) == len(after_failure) == 1
+    assert after_failure[0].revoked_at is None
+    assert after_failure[0].replaced_by_session_id is None
+
+    refreshed = api_client.post("/auth/refresh", json={"refresh_token": refresh_token})
+    assert refreshed.status_code == 200
+    after_refresh = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert len(after_refresh) == 2
+    assert any(session.replaced_by_session_id is not None for session in after_refresh)
+
+
+def test_logout_unknown_token_does_not_change_unrelated_postgresql_session(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """Unknown logout is a private no-op that preserves all unrelated session state."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    user_id = UUID(registration.json()["id"])
+    before = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    response = api_client.post("/auth/logout", json={"refresh_token": secrets.token_urlsafe(48)})
+    after = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert response.status_code == 204 and response.content == b""
+    assert "www-authenticate" not in response.headers
+    assert len(before) == len(after) == 1
+    assert after[0].id == before[0].id
+    assert after[0].token_hash == before[0].token_hash
+    assert after[0].family_id == before[0].family_id
+    assert after[0].created_at == before[0].created_at
+    assert after[0].expires_at == before[0].expires_at
+    assert after[0].last_used_at == before[0].last_used_at
+    assert after[0].revoked_at is None
+    assert after[0].replaced_by_session_id == before[0].replaced_by_session_id
+
+
+def test_logout_known_expired_session_is_idempotent(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """An expired row remains a known family locator for privacy-preserving logout."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    user_id = UUID(registration.json()["id"])
+    token = SecureRefreshTokenManager().generate()
+    created_at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    expired = RefreshSession(
+        id=RefreshSessionId.new(),
+        user_id=UserId(user_id),
+        family_id=RefreshSessionFamilyId.new(),
+        token_hash=token.token_hash,
+        created_at=created_at,
+        expires_at=created_at + timedelta(days=1),
+    )
+
+    async def persist() -> None:
+        async with isolated_database.session_factory() as session:
+            session.add(RefreshSessionMapper.from_domain(expired))
+            await session.commit()
+
+    asyncio.run(persist())
+    first = api_client.post("/auth/logout", json={"refresh_token": token.token})
+    after_first = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    revoked_at = after_first[0].revoked_at
+    second = api_client.post("/auth/logout", json={"refresh_token": token.token})
+    after_second = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert first.status_code == second.status_code == 204
+    assert first.content == second.content == b""
+    assert revoked_at is not None
+    assert after_second[0].revoked_at == revoked_at
+
+
+def test_logout_manually_revoked_session_preserves_its_original_timestamp(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """A non-rotated manually revoked row remains a valid logout family locator."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    user_id = UUID(registration.json()["id"])
+    token = SecureRefreshTokenManager().generate()
+    created_at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    revoked = RefreshSession(
+        id=RefreshSessionId.new(),
+        user_id=UserId(user_id),
+        family_id=RefreshSessionFamilyId.new(),
+        token_hash=token.token_hash,
+        created_at=created_at,
+        expires_at=created_at + timedelta(days=30),
+    )
+    original_revoked_at = created_at + timedelta(minutes=1)
+    revoked.revoke(at=original_revoked_at)
+
+    async def persist() -> None:
+        async with isolated_database.session_factory() as session:
+            session.add(RefreshSessionMapper.from_domain(revoked))
+            await session.commit()
+
+    asyncio.run(persist())
+    first = api_client.post("/auth/logout", json={"refresh_token": token.token})
+    second = api_client.post("/auth/logout", json={"refresh_token": token.token})
+    persisted = asyncio.run(_refresh_sessions(isolated_database.session_factory, user_id))
+    assert first.status_code == second.status_code == 204
+    assert first.content == second.content == b""
+    assert len(persisted) == 1
+    assert persisted[0].revoked_at == original_revoked_at
+    assert persisted[0].replaced_by_session_id is None
+
+
+def test_logout_revokes_family_is_idempotent_and_keeps_access_token_valid(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """Logout removes refresh capability only and commits one family revocation."""
+    registration = api_client.post("/auth/register", json=_registration_payload())
+    login = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    refresh_token = login.json()["refresh_token"]
+    first = api_client.post("/auth/logout", json={"refresh_token": refresh_token})
+    sessions = asyncio.run(
+        _refresh_sessions(isolated_database.session_factory, UUID(registration.json()["id"]))
+    )
+    revoked_at = sessions[0].revoked_at
+    second = api_client.post("/auth/logout", json={"refresh_token": refresh_token})
+    after = asyncio.run(
+        _refresh_sessions(isolated_database.session_factory, UUID(registration.json()["id"]))
+    )
+
+    assert first.status_code == second.status_code == 204
+    assert first.content == second.content == b""
+    assert revoked_at is not None and after[0].revoked_at == revoked_at
+    assert (
+        api_client.post("/auth/refresh", json={"refresh_token": refresh_token}).status_code == 401
+    )
+
+
+def test_logout_old_rotated_token_revokes_active_descendant_only_in_its_family(
+    api_client,
+    login_client: TokenTestKeys,
+    isolated_database: IsolatedDatabase,
+) -> None:
+    """An old token still identifies its family for full refresh-family logout."""
+    api_client.post("/auth/register", json=_registration_payload())
+    first = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    second = api_client.post(
+        "/auth/login",
+        json={"email": "login.user@vectro.dev", "password": "correct horse battery staple"},
+    )
+    rotated = api_client.post(
+        "/auth/refresh", json={"refresh_token": first.json()["refresh_token"]}
+    )
+    logout = api_client.post("/auth/logout", json={"refresh_token": first.json()["refresh_token"]})
+    assert logout.status_code == 204 and logout.content == b""
+    assert (
+        api_client.post(
+            "/auth/refresh", json={"refresh_token": rotated.json()["refresh_token"]}
+        ).status_code
+        == 401
+    )
+    assert (
+        api_client.post(
+            "/auth/refresh", json={"refresh_token": second.json()["refresh_token"]}
+        ).status_code
+        == 200
+    )

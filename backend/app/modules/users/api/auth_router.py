@@ -3,11 +3,12 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.modules.users.api.dependencies import (
     get_current_user,
     get_login_with_password_use_case,
+    get_logout_refresh_session_use_case,
     get_refresh_authentication_use_case,
     get_register_with_password_use_case,
 )
@@ -17,6 +18,7 @@ from app.modules.users.api.schemas import (
     CurrentUserResponse,
     ErrorResponse,
     LoginRequest,
+    LogoutRefreshSessionRequest,
     RefreshAuthenticationRequest,
     RegisterWithPasswordRequest,
     RegisterWithPasswordResponse,
@@ -27,6 +29,8 @@ from app.modules.users.application import (
     InvalidRefreshTokenError,
     LoginWithPassword,
     LoginWithPasswordInput,
+    LogoutRefreshSession,
+    LogoutRefreshSessionInput,
     RefreshAuthentication,
     RefreshAuthenticationInput,
     RefreshTokenReuseDetectedError,
@@ -119,6 +123,18 @@ async def login_with_password(
         return response
 
     return AccessTokenResponse.from_output(output)
+
+
+@router.post(
+    "/logout", status_code=status.HTTP_204_NO_CONTENT, summary="Logout a refresh session family"
+)
+async def logout_refresh_session(
+    request: LogoutRefreshSessionRequest,
+    use_case: Annotated[LogoutRefreshSession, Depends(get_logout_refresh_session_use_case)],
+) -> Response:
+    """Invalidate the supplied refresh token's family without exposing token validity."""
+    await use_case.execute(LogoutRefreshSessionInput(refresh_token=request.refresh_token))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

@@ -15,6 +15,7 @@ from app.modules.users.application import (
     GetCurrentUserOutput,
     InvalidAccessTokenError,
     LoginWithPassword,
+    LogoutRefreshSession,
     RefreshAuthentication,
     RegisterWithPassword,
 )
@@ -139,6 +140,19 @@ async def get_refresh_authentication_use_case(
         refresh_session_repository=SqlAlchemyRefreshSessionRepository(session),
         refresh_token_manager=refresh_token_manager,
         access_token_issuer=access_token_issuer,
+        clock=clock,
+    )
+
+
+async def get_logout_refresh_session_use_case(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    refresh_token_manager: Annotated[RefreshTokenManager, Depends(get_refresh_token_manager)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> LogoutRefreshSession:
+    """Compose request-scoped refresh-family logout without JWT or user dependencies."""
+    return LogoutRefreshSession(
+        refresh_session_repository=SqlAlchemyRefreshSessionRepository(session),
+        refresh_token_manager=refresh_token_manager,
         clock=clock,
     )
 
