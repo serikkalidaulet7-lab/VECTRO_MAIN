@@ -5,14 +5,22 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
 
-from app.modules.users.api.dependencies import get_register_with_password_use_case
+from app.modules.users.api.dependencies import (
+    get_login_with_password_use_case,
+    get_register_with_password_use_case,
+)
 from app.modules.users.api.router import _error_response
 from app.modules.users.api.schemas import (
+    AccessTokenResponse,
     ErrorResponse,
+    LoginRequest,
     RegisterWithPasswordRequest,
     RegisterWithPasswordResponse,
 )
 from app.modules.users.application import (
+    InvalidCredentialsError,
+    LoginWithPassword,
+    LoginWithPasswordInput,
     RegisterWithPassword,
     RegisterWithPasswordInput,
     UserEmailAlreadyExistsError,
@@ -75,3 +83,30 @@ async def register_with_password(
         )
 
     return RegisterWithPasswordResponse.from_output(output)
+
+
+@router.post(
+    "/login",
+    response_model=AccessTokenResponse,
+    summary="Authenticate with an email and password",
+    responses={status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse}},
+)
+async def login_with_password(
+    request: LoginRequest,
+    use_case: Annotated[LoginWithPassword, Depends(get_login_with_password_use_case)],
+) -> AccessTokenResponse | JSONResponse:
+    """Authenticate an existing password credential and issue an access token."""
+    try:
+        output = await use_case.execute(
+            LoginWithPasswordInput(email=request.email, password=request.password)
+        )
+    except InvalidCredentialsError:
+        response = _error_response(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            code="invalid_credentials",
+            message="Invalid email or password.",
+        )
+        response.headers["WWW-Authenticate"] = "Bearer"
+        return response
+
+    return AccessTokenResponse.from_output(output)

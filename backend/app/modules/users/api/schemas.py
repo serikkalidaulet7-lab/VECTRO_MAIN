@@ -4,7 +4,11 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from app.modules.users.application import CreateUserOutput, RegisterWithPasswordOutput
+from app.modules.users.application import (
+    CreateUserOutput,
+    LoginWithPasswordOutput,
+    RegisterWithPasswordOutput,
+)
 
 
 class CreateUserRequest(BaseModel):
@@ -23,6 +27,15 @@ class RegisterWithPasswordRequest(BaseModel):
 
     email: str
     display_name: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    """HTTP payload for password-based login."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str
     password: str
 
 
@@ -69,6 +82,23 @@ class RegisterWithPasswordResponse(BaseModel):
             status=output.status,
             created_at=output.created_at,
             updated_at=output.updated_at,
+        )
+
+
+class AccessTokenResponse(BaseModel):
+    """HTTP representation of a short-lived access token."""
+
+    access_token: str
+    token_type: str
+    expires_in: int
+
+    @classmethod
+    def from_output(cls, output: LoginWithPasswordOutput) -> "AccessTokenResponse":
+        """Create an HTTP response schema from the login output DTO."""
+        return cls(
+            access_token=output.access_token,
+            token_type=output.token_type,
+            expires_in=output.expires_in,
         )
 
 

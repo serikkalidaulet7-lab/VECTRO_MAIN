@@ -132,3 +132,24 @@ def test_password_credential_rejects_backward_lifecycle_timestamps() -> None:
 
     assert credential.status is PasswordCredentialStatus.ACTIVE
     assert credential.revoked_at is None
+
+
+def test_password_credential_replaces_encoded_hash_after_successful_verification() -> None:
+    """A hash upgrade preserves credential identity while advancing lifecycle timestamps."""
+    created_at = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+    changed_at = created_at + timedelta(minutes=1)
+    credential = PasswordCredential.create(
+        user_id=UserId.new(),
+        password_hash=PASSWORD_HASH,
+        created_at=created_at,
+    )
+
+    credential.replace_password_hash(
+        password_hash="$argon2id$replacement-encoded-password-hash",
+        changed_at=changed_at,
+    )
+
+    assert credential.password_hash == "$argon2id$replacement-encoded-password-hash"
+    assert credential.password_changed_at == changed_at
+    assert credential.updated_at == changed_at
+    assert credential.status is PasswordCredentialStatus.ACTIVE

@@ -108,6 +108,24 @@ class PasswordCredential:
         self.revoked_at = occurred_at
         self.updated_at = occurred_at
 
+    def replace_password_hash(
+        self, *, password_hash: str, changed_at: datetime | None = None
+    ) -> None:
+        """Replace an active credential's encoded hash after successful verification."""
+        if self.status is not PasswordCredentialStatus.ACTIVE:
+            raise InvalidPasswordCredentialError(
+                "A revoked credential cannot replace its password hash."
+            )
+        if not isinstance(password_hash, str) or not password_hash.strip():
+            raise InvalidPasswordCredentialError(
+                "A credential must contain an encoded password hash."
+            )
+
+        occurred_at = self._next_updated_at(changed_at)
+        self.password_hash = password_hash
+        self.password_changed_at = occurred_at
+        self.updated_at = occurred_at
+
     def _next_updated_at(self, value: datetime | None) -> datetime:
         updated_at = self._normalize_timestamp(value or _utc_now())
         if updated_at < self.updated_at:

@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     DATABASE_POOL_SIZE: int = Field(default=10, ge=1)
     DATABASE_MAX_OVERFLOW: int = Field(default=20, ge=0)
+    JWT_ISSUER: str = "vectro"
+    JWT_AUDIENCE: str = "vectro-api"
+    JWT_PRIVATE_KEY: str | None = None
+    JWT_PUBLIC_KEY: str | None = None
+    ACCESS_TOKEN_TTL_SECONDS: int = Field(default=900, ge=60, le=3600)
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,

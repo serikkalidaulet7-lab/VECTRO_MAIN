@@ -7,3 +7,7 @@ class UsersApplicationError(Exception):
 
 class UserEmailAlreadyExistsError(UsersApplicationError):
     """Raised when a user creation request duplicates an existing email."""
+
+
+class InvalidCredentialsError(UsersApplicationError):
+    """Raised when password authentication cannot establish a valid identity."""

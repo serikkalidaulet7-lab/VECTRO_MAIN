@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.modules.users.application.ports import IssuedAccessToken
 from app.modules.users.domain import User
 
 
@@ -68,4 +69,30 @@ class RegisterWithPasswordOutput:
             status=user.status.value,
             created_at=user.created_at,
             updated_at=user.updated_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LoginWithPasswordInput:
+    """Primitive data required to authenticate a user by email and password."""
+
+    email: str
+    password: str
+
+
+@dataclass(frozen=True, slots=True)
+class LoginWithPasswordOutput:
+    """Safe access-token representation returned after successful password login."""
+
+    access_token: str
+    token_type: str
+    expires_in: int
+
+    @classmethod
+    def from_issued_token(cls, issued_token: IssuedAccessToken) -> "LoginWithPasswordOutput":
+        """Map an application token-issuer result to the login output boundary."""
+        return cls(
+            access_token=issued_token.token,
+            token_type=issued_token.token_type,
+            expires_in=issued_token.expires_in,
         )
